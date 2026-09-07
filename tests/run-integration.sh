@@ -8,6 +8,11 @@ if [[ -z "${MARS:-}" ]]; then
   done
 fi
 MARS="${MARS:-target/debug/mars}"
+if [[ ! -x "$MARS" ]]; then
+  echo "error: $MARS is not an executable runtime; build it or set MARS" >&2
+  exit 1
+fi
+MARS="$(cd "$(dirname "$MARS")" && pwd)/$(basename "$MARS")"
 WORK="${WORK:-/tmp/mars-it}"
 IMAGE="${IMAGE:-alpine:3.20}"
 
