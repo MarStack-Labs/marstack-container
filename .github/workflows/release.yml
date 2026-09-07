@@ -1,0 +1,101 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Refuse a tag that is not on main
+        run: |
+          git fetch --no-tags --quiet origin main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "${GITHUB_REF_NAME} points at a commit that is not on main"
+            exit 1
+          fi
+
+  build:
+    needs: guard
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: install libseccomp headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libseccomp-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo test --lib
+
+      - name: Build the release archive
+        run: make dist VERSION="${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksum every archive together
+        run: cd dist && sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Take the release notes from the changelog
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            index($0, "## [" v "]") == 1 { inside = 1; next }
+            inside && /^## / { exit }
+            inside { print }
+          ' CHANGELOG.md | sed '/./,$!d' > notes.md
+          if [ -s notes.md ]; then
+            echo "notes=--notes-file notes.md" >> "$GITHUB_ENV"
+          else
+            echo "CHANGELOG.md has no section for $version, generating notes from commits"
+            echo "notes=--generate-notes" >> "$GITHUB_ENV"
+          fi
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --verify-tag \
+            $notes \
+            dist/*.tar.gz dist/SHA256SUMS
