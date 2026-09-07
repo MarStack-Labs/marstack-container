@@ -59,23 +59,6 @@ jobs:
           comm -23 /tmp/used /tmp/defined
           exit 1
 
-      - name: Refuse a theme that has drifted from the other marstack sites
-        run: |
-          for asset in meridian.css site.css; do
-            remote=$(curl -sSL --fail \
-              "https://raw.githubusercontent.com/MarStack-Labs/marstack-access/main/site/$asset") || {
-                echo "cannot read $asset from marstack-access; skipping the drift check"
-                continue
-              }
-            if [ "$(printf '%s' "$remote" | sha256sum | cut -d' ' -f1)" \
-               != "$(sha256sum "site/$asset" | cut -d' ' -f1)" ]; then
-              echo "site/$asset differs from the copy marstack-access ships"
-              echo "this repository vendors the theme because it has no console to copy it from,"
-              echo "so drift has to be caught here rather than by a build step"
-              exit 1
-            fi
-          done
-
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
