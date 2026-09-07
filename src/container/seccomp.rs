@@ -1,6 +1,6 @@
 use libseccomp::{
-    ScmpAction, ScmpArch, ScmpArgCompare, ScmpCompareOp, ScmpFilterAttr, ScmpFilterContext,
-    ScmpSyscall,
+    error::SeccompErrno, ScmpAction, ScmpArch, ScmpArgCompare, ScmpCompareOp, ScmpFilterAttr,
+    ScmpFilterContext, ScmpSyscall,
 };
 use oci_spec::runtime::{
     Arch, LinuxSeccomp, LinuxSeccompAction, LinuxSeccompFilterFlag, LinuxSeccompOperator,
@@ -9,6 +9,16 @@ use oci_spec::runtime::{
 use crate::error::{Error, Result};
 
 pub fn apply(spec: &LinuxSeccomp) -> Result<usize> {
+    let (filter, rules) = build(spec)?;
+
+    filter
+        .load()
+        .map_err(|error| Error::Invalid(format!("load the seccomp filter: {error}")))?;
+
+    Ok(rules)
+}
+
+fn build(spec: &LinuxSeccomp) -> Result<(ScmpFilterContext, usize)> {
     let default = action(spec.default_action(), spec.default_errno_ret())?;
     let mut filter = ScmpFilterContext::new(default)
         .map_err(|error| Error::Invalid(format!("create a seccomp filter: {error}")))?;
@@ -70,22 +80,34 @@ pub fn apply(spec: &LinuxSeccomp) -> Result<usize> {
                 .map(comparator)
                 .collect::<Result<Vec<_>>>()?;
 
-            if comparators.is_empty() {
+            let added = if comparators.is_empty() {
                 filter.add_rule(verdict, syscall)
             } else {
                 filter.add_rule_conditional(verdict, syscall, &comparators)
-            }
-            .map_err(|error| Error::Invalid(format!("add a seccomp rule for {name}: {error}")))?;
+            };
 
-            rules += 1;
+            match added {
+                Ok(_) => rules += 1,
+                Err(error)
+                    if verdict == default && error.errno() == Some(SeccompErrno::EACCES) =>
+                {
+                    tracing::debug!(
+                        syscall = %name,
+                        "the spec restates the filter's default action for this syscall, so \
+                         libseccomp refuses the rule as redundant; dropping it cannot change \
+                         what the filter permits"
+                    );
+                }
+                Err(error) => {
+                    return Err(Error::Invalid(format!(
+                        "add a seccomp rule for {name}: {error}"
+                    )));
+                }
+            }
         }
     }
 
-    filter
-        .load()
-        .map_err(|error| Error::Invalid(format!("load the seccomp filter: {error}")))?;
-
-    Ok(rules)
+    Ok((filter, rules))
 }
 
 fn action(requested: LinuxSeccompAction, errno: Option<u32>) -> Result<ScmpAction> {
@@ -213,5 +235,86 @@ mod tests {
         ScmpSyscall::from_name("write").unwrap();
         ScmpSyscall::from_name("chmod").unwrap();
         assert!(ScmpSyscall::from_name("definitely_not_a_syscall").is_err());
+    }
+
+    fn seccomp(json: &str) -> LinuxSeccomp {
+        serde_json::from_str(json).expect("the test's seccomp fragment should deserialize")
+    }
+
+    #[test]
+    fn a_rule_restating_the_default_action_is_tolerated() {
+        let spec = seccomp(
+            r#"{
+                 "defaultAction": "SCMP_ACT_ERRNO",
+                 "architectures": ["SCMP_ARCH_NATIVE"],
+                 "syscalls": [
+                   { "names": ["bpf", "setns", "init_module"], "action": "SCMP_ACT_ERRNO" }
+                 ]
+               }"#,
+        );
+
+        let (_, rules) = build(&spec).expect(
+            "libseccomp refuses these as redundant, and refusing the container over that is \
+             what stopped every standard profile from loading",
+        );
+
+        assert_eq!(rules, 0);
+    }
+
+    #[test]
+    fn a_rule_that_differs_from_the_default_is_still_added() {
+        let spec = seccomp(
+            r#"{
+                 "defaultAction": "SCMP_ACT_ERRNO",
+                 "architectures": ["SCMP_ARCH_NATIVE"],
+                 "syscalls": [
+                   { "names": ["write", "read"], "action": "SCMP_ACT_ALLOW" }
+                 ]
+               }"#,
+        );
+
+        let (_, rules) = build(&spec).unwrap();
+
+        assert_eq!(rules, 2);
+    }
+
+    #[test]
+    fn tolerating_the_redundant_rule_does_not_tolerate_an_inverted_one() {
+        let spec = seccomp(
+            r#"{
+                 "defaultAction": "SCMP_ACT_ALLOW",
+                 "architectures": ["SCMP_ARCH_NATIVE"],
+                 "syscalls": [
+                   { "names": ["bpf"], "action": "SCMP_ACT_ERRNO" }
+                 ]
+               }"#,
+        );
+
+        let (_, rules) = build(&spec).unwrap();
+
+        assert_eq!(
+            rules, 1,
+            "under an allow-by-default filter a deny rule carries the whole policy; silently \
+             dropping it would open the syscall it was written to close"
+        );
+    }
+
+    #[test]
+    fn the_standard_profile_shape_loads_end_to_end() {
+        let spec = seccomp(
+            r#"{
+                 "defaultAction": "SCMP_ACT_ERRNO",
+                 "architectures": ["SCMP_ARCH_NATIVE"],
+                 "syscalls": [
+                   { "names": ["read", "write", "exit_group"], "action": "SCMP_ACT_ALLOW" },
+                   { "names": ["bdflush", "vm86", "uselib"], "action": "SCMP_ACT_ERRNO" },
+                   { "names": ["definitely_not_a_syscall"], "action": "SCMP_ACT_ALLOW" }
+                 ]
+               }"#,
+        );
+
+        let (_, rules) = build(&spec).unwrap();
+
+        assert_eq!(rules, 3);
     }
 }

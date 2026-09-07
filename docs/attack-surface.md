@@ -67,54 +67,69 @@ only and is not comparable in absolute terms to the columns that run to containe
 
 | runtime | `run` | `vol` | `exec` | `tty` |
 |---|---|---|---|---|
-| `mars` | **1559** | **1560** | **484** | **1544** |
-| `crun` 1.14.1 | 2062 | 2065 | 920 | 2017 |
-| `runc` 1.5.1 | 2351 | 2354 | 1140 | 2366 |
+| `mars` | **1542** | **1542** | **494** | **1545** |
+| `crun` 1.14.1 | 2030 | 2030 | 889 | 1984 |
+| `runc` 1.5.1 | 2361 | 2355 | 1134 | 2370 |
 
-`mars` reaches 24% less kernel than `crun` and 34% less than `runc` on a plain start, and 47% / 58%
+`mars` reaches 24% less kernel than `crun` and 35% less than `runc` on a plain start, and 44% / 56%
 less on `exec` — the operation a Kubernetes exec probe repeats for the lifetime of a pod.
 
-Three things fall out of the matrix:
+Four things fall out of the matrix:
 
 **It is not that `mars` skips work.** Namespace creation, `pivot_root`, cgroup setup and capability
 handling all appear at parity; on cgroups `mars` matches `runc` and touches eight times what `crun`
-does. Of the 843 functions `runc` reaches and `mars` does not, only 10 are thread, futex or scheduler
-functions — the Go runtime is not the explanation. 250 are file, path and `/proc` traversal.
+does. Of the 1000 functions `runc` reaches on a plain start and `mars` does not, only 10 are thread,
+futex or scheduler functions — the Go runtime is not the explanation, which is the opposite of what
+the shim's memory cost would suggest. 301 are file, path and `/proc` traversal, and 116 are
+networking.
 
-**A bind mount is nearly free.** `vol` costs one to three functions more than `run` for every runtime.
-The mount machinery has already been walked to assemble the rootfs.
+**A bind mount is free.** `vol` costs the same as `run` to the function for `mars` and `crun`, and six
+fewer for `runc`. The mount machinery has already been walked to assemble the rootfs.
 
-**A pty costs almost nothing.** `tty` lands within a few percent of `run` despite allocating a
-terminal and passing a descriptor over a socket.
+**A pty costs almost nothing.** `tty` lands within a few percent of `run` for all three despite
+allocating a terminal and passing a descriptor over a socket.
 
-The 40 functions `mars` reaches that `runc` does not are its own instrumentation:
-`cgroup_events_show`, `memory_events_show`, `cpu_stat_show`, `css_task_iter_*` — reading the cgroup
-event and statistics files that [`failure-modes.md`](failure-modes.md) is built on.
+**The ordering is stable across every workload.** Four different operations, the same ranking and
+roughly the same ratios. A measurement artefact would have to survive all four to explain that.
+
+The 29 functions `mars` reaches that `runc` does not are its own instrumentation:
+`cgroup_events_show`, `memory_events_show`, `cpu_stat_show`, `cgroup_base_stat_cputime_show`,
+`__arm64_sys_ppoll` — reading the cgroup event and statistics files that
+[`failure-modes.md`](failure-modes.md) is built on.
 
 ## What the benchmark found in `mars`
 
-Widening the workload to cover seccomp turned up a defect that the narrow one hid.
-
-`mars` will not start a container whose profile names a syscall `libseccomp` cannot resolve. It fails
-on the first one:
+Widening the workload to cover seccomp turned up a defect the narrow one hid. Against the profile
+Podman and CRI-O ship, `mars` refused to start at all:
 
 ```
 config.json is invalid: add a seccomp rule for bdflush:
 The library doesn't permit the particular operation
 ```
 
-`runc` and `crun` accept the same profile unchanged. Against the profile Podman and CRI-O ship,
-**59 syscall names have to be removed before `mars` will start**, among them `bpf`, `setns`,
-`chroot`, `init_module`, `perf_event_open`, `userfaultfd` and `kexec_load`. Both other runtimes skip
-unresolvable names deliberately; `mars` propagates the error as fatal.
+59 syscall names had to be removed before it would run — `bpf`, `setns`, `chroot`, `init_module`,
+`perf_event_open`, `userfaultfd`, `kexec_load` among them. `runc` and `crun` accepted the same
+profile unchanged, removing none.
 
-This is a blocker rather than a rough edge. Every real platform ships a profile carrying legacy x86
-syscall names, so `mars` would refuse to start under all of them.
+The first diagnosis was wrong, and worth recording because it was plausible. Those names look like
+syscalls that do not exist on aarch64, so the obvious reading was that `libseccomp` could not resolve
+them. But `mars` already skipped unresolvable names; the failure came one step later, from
+`seccomp_rule_add`.
 
-The fix has to be narrower than "ignore errors from `seccomp_rule_add`". Skipping a name is only safe
-because these profiles deny by default; under a profile with an `SCMP_ACT_ALLOW` default, silently
-dropping a name would open a syscall that was meant to be closed. Only the arch-unavailable case may
-be skipped, and every other libseccomp error must stay fatal.
+That message is `libseccomp`'s wording for `EACCES`, and `seccomp_rule_add` returns `EACCES` for a
+rule whose action equals the filter's *default* action — a rule that asks for what the filter already
+does. These profiles deny by default and then spell out denials for the privileged syscalls, so every
+such rule is redundant by construction. All 59 rejected names came from `SCMP_ACT_ERRNO` entries
+under an `SCMP_ACT_ERRNO` default; not one was an architecture problem.
+
+Getting the cause right made the fix narrow. `mars` now tolerates `EACCES` **only** when the rule's
+verdict equals the default action, which cannot change what the filter permits: the syscall was
+already denied by the default and stays denied. Every other `libseccomp` error is still fatal, and a
+deny rule under an `SCMP_ACT_ALLOW` default — where the rule carries the whole policy and dropping it
+would open the syscall it was written to close — has a different action from the default, so it never
+takes the tolerant path. A unit test asserts exactly that case.
+
+All three runtimes now share the unmodified 442-name profile.
 
 ## Limits
 
