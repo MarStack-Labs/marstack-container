@@ -1,6 +1,6 @@
 use libseccomp::{
-    error::SeccompErrno, ScmpAction, ScmpArch, ScmpArgCompare, ScmpCompareOp, ScmpFilterAttr,
-    ScmpFilterContext, ScmpSyscall,
+    ScmpAction, ScmpArch, ScmpArgCompare, ScmpCompareOp, ScmpFilterAttr, ScmpFilterContext,
+    ScmpSyscall, error::SeccompErrno,
 };
 use oci_spec::runtime::{
     Arch, LinuxSeccomp, LinuxSeccompAction, LinuxSeccompFilterFlag, LinuxSeccompOperator,
@@ -88,9 +88,7 @@ fn build(spec: &LinuxSeccomp) -> Result<(ScmpFilterContext, usize)> {
 
             match added {
                 Ok(_) => rules += 1,
-                Err(error)
-                    if verdict == default && error.errno() == Some(SeccompErrno::EACCES) =>
-                {
+                Err(error) if verdict == default && error.errno() == Some(SeccompErrno::EACCES) => {
                     tracing::debug!(
                         syscall = %name,
                         "the spec restates the filter's default action for this syscall, so \
