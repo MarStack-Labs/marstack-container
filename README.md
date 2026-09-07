@@ -21,6 +21,7 @@ created and wrote itself.
 | Integration suite | 128 assertions, all reading kernel state rather than the runtime's own claims |
 | Docker drop-in | `run`, `run -it`, `exec`, `stop`, `--memory` — [details](docs/06-docker-and-tracing.md) |
 | Startup tracing | OTLP spans per phase, accepted by Tempo |
+| Kernel attack surface | **1542** distinct host kernel functions to start a container, against `crun`'s 2030 and `runc`'s 2361 — [details](docs/attack-surface.md) |
 | Not implemented | rootless without privilege, CNI networking, image pulling, cgroup v1, systemd cgroup driver |
 
 ## Why build this when runc exists?

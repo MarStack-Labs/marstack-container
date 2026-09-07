@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
 description = "An OCI-compliant container runtime written from scratch in Rust"
-repository = "https://github.com/umars28/mars-container-runtime"
+repository = "https://github.com/MarStack-Labs/marstack-container"
 
 [lib]
 name = "mars"
