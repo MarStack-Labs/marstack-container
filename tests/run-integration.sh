@@ -8,6 +8,11 @@ if [[ -z "${MARS:-}" ]]; then
   done
 fi
 MARS="${MARS:-target/debug/mars}"
+if [[ ! -x "$MARS" ]]; then
+  echo "error: $MARS is not an executable runtime; build it or set MARS" >&2
+  exit 1
+fi
+MARS="$(cd "$(dirname "$MARS")" && pwd)/$(basename "$MARS")"
 WORK="${WORK:-/tmp/mars-it}"
 IMAGE="${IMAGE:-alpine:3.20}"
 
@@ -283,6 +288,7 @@ check "container sees its own cgroup as the root" "0::/" "$cgns"
 echo
 echo "memory.max and OOM kill"
 bundle "$WORK/oom" '.linux.resources.memory.limit = 33554432
+  | .linux.resources.memory.swap = 33554432
   | .process.args = ["/usr/bin/awk","BEGIN{s=\"\";while(1){s = s sprintf(\"%1000000s\",\"\")}}"]'
 oom_log=$(run_in "$WORK/oom" it-oom 2>&1)
 check "OOM kill is reported as 128+9" "137" "$?"

@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="en" data-surface="navy">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>marstack-container — an OCI container runtime written from scratch in Rust</title>
+<meta name="description" content="An OCI runtime built to understand the layer Docker hides. Namespaces, cgroup v2 and OverlayFS written by hand, nine production failure modes reproduced from kernel state, and the smallest privileged kernel surface of the three runtimes measured.">
+<link rel="stylesheet" href="meridian.css">
+<link rel="stylesheet" href="site.css">
+</head>
+<body class="ms-root">
+
+<nav class="top">
+  <b class="ms-wordmark">marstack</b>
+  <span class="ms-eyebrow">container</span>
+  <span class="grow"></span>
+  <a href="#quickstart">Quickstart</a>
+  <a href="#surface">Attack surface</a>
+  <a href="#docker">Docker</a>
+  <a href="https://github.com/MarStack-Labs/marstack-container">GitHub</a>
+</nav>
+
+<header class="hero">
+  <span class="ms-pill ms-pill-pending"><i></i>pre-release · v0.1.0</span>
+  <h1>The layer Docker hides, written out and measured.</h1>
+  <p class="lede">
+    An OCI runtime that takes a filesystem bundle and a <code>config.json</code> and turns it into an
+    isolated process, using nothing but Linux namespaces, cgroup v2, OverlayFS, capabilities and
+    seccomp. Not a <code>runc</code> competitor. Built because reading about that layer does not build
+    a model of it.
+  </p>
+
+  <div class="cards">
+    <div class="card">
+      <b>The smallest privileged surface measured</b>
+      <span>1542 distinct kernel functions to start a container, against <code>crun</code>'s 2030 and <code>runc</code>'s 2361.</span>
+    </div>
+    <div class="card">
+      <b>Failures with evidence</b>
+      <span>Nine production failure modes reproduced, each read from kernel state rather than from what the runtime claims.</span>
+    </div>
+    <div class="card">
+      <b>Single-threaded until it forks</b>
+      <span><code>setns(2)</code> refuses a multi-threaded process. Rust stays single-threaded, so <code>exec</code> needs no C constructor.</span>
+    </div>
+    <div class="card">
+      <b>A drop-in Docker runtime</b>
+      <span><code>docker run --runtime=mars</code>, with an OTLP span per startup phase and no background thread.</span>
+    </div>
+  </div>
+</header>
+
+<div class="page">
+  <aside class="toc">
+    <ol>
+      <li><a href="#what">What it is</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#quickstart">First container</a></li>
+      <li><a href="#lifecycle">Lifecycle</a></li>
+      <li><a href="#cgroups">cgroup v2</a></li>
+      <li><a href="#rootfs">Layered rootfs</a></li>
+      <li><a href="#hardening">Hardening</a></li>
+      <li><a href="#docker">As a Docker runtime</a></li>
+      <li><a href="#tracing">Startup traces</a></li>
+      <li><a href="#surface">Attack surface</a></li>
+      <li><a href="#failures">Failure modes</a></li>
+      <li><a href="#production">Before production</a></li>
+      <li><a href="#excluded">Out of scope</a></li>
+    </ol>
+  </aside>
+
+  <main class="body">
+
+    <section id="what">
+      <h2>What it is</h2>
+      <p>
+        <code>mars</code> implements the
+        <a href="https://github.com/opencontainers/runtime-spec">OCI runtime-spec</a>. It is the layer
+        Docker and Kubernetes sit on top of — the one that actually creates the namespaces, writes the
+        cgroups, assembles the rootfs and drops the capabilities.
+      </p>
+      <p>
+        It is not meant for production, and it is not trying to displace <code>runc</code>. It exists
+        because container failures in production happen in the layer Docker hides, and the only way to
+        build a model of that layer is to write it.
+      </p>
+      <div class="scroller">
+        <table>
+          <tr><th>OCI validation suite</th><td><strong>26 passed</strong>, against <code>runc</code> 1.5.1's 22 on the same host</td></tr>
+          <tr><th>Integration suite</th><td>128 assertions, every one reading kernel state rather than the runtime's own claims</td></tr>
+          <tr><th>Kernel attack surface</th><td><strong>1542</strong> distinct functions to start a container, against <code>crun</code>'s 2030 and <code>runc</code>'s 2361</td></tr>
+          <tr><th>Docker drop-in</th><td><code>run</code>, <code>run -it</code>, <code>exec</code>, <code>stop</code>, <code>--memory</code></td></tr>
+          <tr><th>Language</th><td>Rust, deliberately — see <a href="#lifecycle">Lifecycle</a></td></tr>
+        </table>
+      </div>
+    </section>
+
+    <section id="install">
+      <h2>Install</h2>
+      <p>
+        Check the host first. Most of what can go wrong is the host, not the build.
+      </p>
+      <pre><code>./scripts/preflight.sh</code></pre>
+      <div class="note" data-tone="warn">
+        <p>
+          <strong>The one that stops people: a VPS that is itself a container.</strong> OpenVZ, LXC and
+          most budget plans share the provider's kernel, which blocks <code>pivot_root</code> and cgroup
+          delegation. If <code>systemd-detect-virt -c</code> names anything other than <code>none</code>,
+          <code>mars</code> cannot run there and no amount of <code>sudo</code> changes it — you need
+          KVM, Xen, or bare metal.
+        </p>
+        <p>
+          The other common blocker is a hybrid cgroup hierarchy. There is no v1 driver, so
+          <code>/sys/fs/cgroup</code> must be <code>cgroup2fs</code>.
+        </p>
+      </div>
+      <p>On a Debian or Ubuntu host that passes preflight:</p>
+      <pre><code>sudo apt-get install -y build-essential pkg-config libseccomp-dev jq attr uidmap
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+cargo build --release
+sudo install -m 0755 target/release/mars /usr/local/bin/mars</code></pre>
+      <p>
+        Linux only: it needs namespaces, cgroups and <code>libseccomp</code>, and does not build on
+        macOS. A <a href="https://lima-vm.io">Lima</a> VM definition is included so the environment is
+        reproducible.
+      </p>
+      <pre><code>limactl start --name=mars-dev ./lima/mars-dev.yaml
+limactl shell mars-dev</code></pre>
+    </section>
+
+    <section id="quickstart">
+      <h2>First container</h2>
+      <p>Generate a bundle, put a rootfs in it, run it.</p>
+      <pre><code>mars spec --bundle /tmp/demo
+./scripts/make-rootfs.sh /tmp/demo/rootfs
+cd /tmp/demo &amp;&amp; sudo mars run demo</code></pre>
+      <p>
+        That is a memory limit, a PID namespace, a pivoted root and a seccomp filter, all built by
+        writing to the kernel rather than by asking a library to do it.
+      </p>
+      <pre><code>$ docker run --rm --runtime=mars --memory=64m alpine:3.20 cat /sys/fs/cgroup/memory.max
+67108864</code></pre>
+      <p>
+        Docker, using <code>mars</code> instead of <code>runc</code>, enforcing a limit through a cgroup
+        that <code>mars</code> created and wrote itself.
+      </p>
+    </section>
+
+    <section id="lifecycle">
+      <h2>Lifecycle</h2>
+      <p>
+        The full spec surface is implemented: <code>create</code>, <code>start</code>,
+        <code>state</code>, <code>kill</code>, <code>delete</code>, <code>exec</code>,
+        <code>list</code>, <code>ps</code>, <code>pause</code>, <code>resume</code>,
+        <code>events</code>, <code>update</code>, <code>spec</code>, <code>features</code>, all five
+        lifecycle hooks, and a console socket over <code>SCM_RIGHTS</code>.
+      </p>
+      <p>
+        <strong>The three-level fork chain is forced by the kernel, not a style choice.</strong>
+      </p>
+      <pre><code>mars create
+  │  socketpair(AF_UNIX)
+  ├─ fork() ─────────► [intermediate]
+  │                      unshare(NEWUSER|NEWNS|NEWPID|NEWUTS|NEWIPC|NEWNET|NEWTIME)
+  │  ◄── "map me" ────
+  │  write /proc/&lt;pid&gt;/setgroups, uid_map, gid_map
+  │  ─── "mapped" ──►   setresuid(0) — a new user namespace leaves you unmapped
+  │                      fork() ──────────► [container init, PID 1]
+  │                        exit                mounts, pivot_root, devices
+  │  write pid to cgroup.procs                 caps, seccomp, no_new_privs
+  │  ◄── "ready" ─────────────────────────────  block on exec.fifo
+mars create returns; the container stays alive, waiting
+mars start ──── opens the fifo ─────────────────► execve(user process)</code></pre>
+      <p>
+        <code>unshare(CLONE_NEWPID)</code> does <strong>not</strong> move the caller into the new PID
+        namespace — the next <code>fork()</code> is what becomes PID 1, and the same holds for
+        <code>CLONE_NEWTIME</code>. <code>uid_map</code> has to be written from outside the user
+        namespace by a privileged process, because a process cannot map itself, so the two ends need
+        two-way synchronisation. And <code>create</code> must return while the container stays alive,
+        so the wait has to be on something a later unrelated process can reach: a fifo, opened
+        <code>O_PATH</code> by the parent so it does not count as an opener, reopened by the init
+        through <code>/proc/self/fd/N</code> because the path is gone after <code>pivot_root</code>.
+      </p>
+      <p>
+        <strong>Rust instead of Go, deliberately.</strong> <code>setns(2)</code> refuses to move a
+        multi-threaded process into a new mount or user namespace. Go is already multi-threaded when
+        <code>main</code> starts, which is why <code>runc</code> ships a C constructor that runs before
+        the Go runtime initialises. Rust stays single-threaded until the fork, so <code>mars exec</code>
+        calls <code>setns</code> directly — and asserts the property by counting
+        <code>/proc/self/task</code> rather than assuming it.
+      </p>
+    </section>
+
+    <section id="cgroups">
+      <h2>cgroup v2</h2>
+      <p>
+        The driver is hand-written against <code>cgroupfs</code> rather than delegated to a crate —
+        <code>memory</code>, <code>cpu</code>, <code>pids</code>, <code>cpuset</code> and
+        <code>io</code>, written directly. Delegating it would delegate away the main thing this
+        project is for.
+      </p>
+      <p>
+        <strong>Writing one pid to <code>cgroup.procs</code> is the most expensive step in starting a
+        container</strong> — 55% to 79% of cold start, measured. Creating the cgroup and writing every
+        limit takes 279µs; moving one process into it takes 7–15ms, because the first migration into a
+        fresh cgroup pays for per-cgroup controller setup and an RCU grace period across every CPU.
+        Every container gets a fresh cgroup, so nothing is ever amortised.
+      </p>
+      <pre><code>trace 10a2ae966c82f09af3c6d2282991b79c  25 spans  11892us total
+     458us    279us  cgroup                      create it, write every limit
+    1012us    895us  intermediate.unshare.net    a whole network stack
+    2358us   7065us  cgroup.attach               write one pid to one file
+    9438us    492us  init.rootfs.mount
+    9931us    232us  init.pivot_root</code></pre>
+    </section>
+
+    <section id="rootfs">
+      <h2>Layered rootfs</h2>
+      <p>
+        <strong>The overlay rootfs is a documented extension, not a spec feature.</strong> The
+        runtime-spec has no field for image layers — that is the image-spec's job, done by containerd or
+        Docker before the runtime is called. <code>mars</code> reads three
+        <code>dev.mars.overlay.*</code> annotations instead, so the <code>config.json</code> stays valid
+        for any other runtime, which will ignore them.
+      </p>
+      <pre><code>sudo -E ./scripts/oci-bundle.sh -i alpine:3.20 /tmp/layered
+cd /tmp/layered &amp;&amp; sudo mars run demo
+find /tmp/layered/diff -mindepth 1        # everything the container wrote</code></pre>
+      <p>
+        The <code>.wh.</code> markers from the image tarballs are converted into real OverlayFS
+        whiteouts, and <code>process</code>, <code>env</code> and <code>cwd</code> are taken from the
+        image config.
+      </p>
+      <div class="note" data-tone="warn">
+        <p>
+          <strong>A mount option string over 4096 bytes is truncated, not rejected.</strong> Enough
+          OverlayFS layers and the kernel silently cuts the <code>lowerdir=</code> list mid-path, then
+          reports <code>ENOENT</code> against the mount <em>source</em> — an error naming neither the
+          truncation nor the layer count. This is what the short symlinks in
+          <code>/var/lib/docker/overlay2/l/</code> are for.
+        </p>
+      </div>
+    </section>
+
+    <section id="hardening">
+      <h2>Hardening</h2>
+      <p>
+        Capabilities, seccomp, <code>no_new_privs</code>, read-only rootfs,
+        <code>maskedPaths</code> and <code>readonlyPaths</code>, sysctls, rlimits,
+        <code>oomScoreAdj</code>, and user namespaces with a <code>newuidmap</code> fallback.
+      </p>
+      <p>
+        <code>readonlyPaths</code> cannot simply remount a path read-only, because a path is not a
+        mount. It has to be made one first, by bind-mounting it onto itself, and only then remounted
+        with <code>MS_RDONLY</code>. <code>maskedPaths</code> binds <code>/dev/null</code> over a file
+        and an empty read-only <code>tmpfs</code> over a directory — which is how
+        <code>/proc/kcore</code>, a mapping of all physical memory, stops being readable inside a
+        container.
+      </p>
+      <p>Run the OCI validation suite against either runtime and compare:</p>
+      <pre><code>sudo -E ./scripts/run-validation.sh
+sudo -E RUNTIME=runc ./scripts/run-validation.sh</code></pre>
+    </section>
+
+    <section id="docker">
+      <h2>As a Docker runtime</h2>
+      <pre><code>sudo ./scripts/install-docker-runtime.sh          # TRACE=1 also logs how Docker calls it
+docker run --rm -it --runtime=mars alpine:3.20 sh</code></pre>
+      <p>
+        <code>TRACE=1</code> is there because the interesting part is not that it works, but the exact
+        sequence of calls Docker makes to a runtime it has never seen before.
+      </p>
+    </section>
+
+    <section id="tracing">
+      <h2>Startup traces</h2>
+      <p>
+        Every startup phase emits an OTLP span, accepted by Tempo. No collector needed to look at them:
+      </p>
+      <pre><code>./scripts/otlp-echo.py 4318 &amp;
+MARS_OTLP_ENDPOINT=127.0.0.1:4318 sudo -E mars run demo</code></pre>
+      <p>
+        <strong>The exporter is hand-written for a hard reason.</strong> The OpenTelemetry SDK runs its
+        exporter on a background thread. A process that forks must not have one — only
+        async-signal-safe work is legal in the child — and a process that calls <code>setns</code> must
+        not either. So the exporter is around 120 lines that build OTLP/HTTP JSON and write one POST:
+        no threads, nothing running at <code>fork()</code> time.
+      </p>
+    </section>
+
+    <section id="surface">
+      <h2>Attack surface</h2>
+      <p>
+        A runtime spends its whole life as root. It holds <code>CAP_SYS_ADMIN</code>, it creates the
+        namespaces and writes the cgroups, and then it exits. Everything dangerous it will ever do, it
+        does in that window — and published runtime comparisons measure startup latency and per-container
+        memory, not that.
+      </p>
+      <p>
+        <code>scripts/hap-bench.sh</code> counts the distinct host kernel functions a runtime traverses
+        while privileged, traced with <code>ftrace</code>, following Bottomley's horizontal attack
+        profile. Five runs per cell, median, idle subtracted, all three runtimes sharing one unmodified
+        seccomp profile:
+      </p>
+      <div class="scroller">
+        <table>
+          <tr><th>runtime</th><th><code>run</code></th><th><code>vol</code></th><th><code>exec</code></th><th><code>tty</code></th></tr>
+          <tr><td><strong>mars</strong></td><td><strong>1542</strong></td><td><strong>1542</strong></td><td><strong>494</strong></td><td><strong>1545</strong></td></tr>
+          <tr><td><code>crun</code> 1.14.1</td><td>2030</td><td>2030</td><td>889</td><td>1984</td></tr>
+          <tr><td><code>runc</code> 1.5.1</td><td>2361</td><td>2355</td><td>1134</td><td>2370</td></tr>
+        </table>
+      </div>
+      <p>
+        24% less kernel than <code>crun</code> and 35% less than <code>runc</code> on a plain start, and
+        44% / 56% less on <code>exec</code> — the operation a Kubernetes exec probe repeats for the
+        lifetime of a pod.
+      </p>
+      <p>
+        <strong>It is not that <code>mars</code> skips work.</strong> Namespace creation,
+        <code>pivot_root</code>, cgroup setup and capability handling all appear at parity. Of the 1000
+        functions <code>runc</code> reaches and <code>mars</code> does not, only 10 are thread, futex or
+        scheduler functions — the Go runtime is not the explanation. 301 are file, path and
+        <code>/proc</code> traversal.
+      </p>
+      <div class="note" data-tone="info">
+        <p>
+          Counting function entries cannot see control flow <em>inside</em> a function, so a ten-line
+          function and a five-hundred-line one count the same. Basic-block coverage through
+          <code>kcov</code> is the honest version, and it needs a kernel built for the purpose. One
+          architecture, one kernel version, and a guest kernel rather than bare metal: the comparison
+          between runtimes holds because all three meet identical conditions, but the absolute values do
+          not travel.
+        </p>
+      </div>
+      <p>
+        Widening that benchmark to cover seccomp is what found the one real defect so far: a rule that
+        restates the filter's default action, which <code>libseccomp</code> refuses as redundant and
+        <code>mars</code> was treating as fatal. Every standard profile carries dozens of them.
+      </p>
+    </section>
+
+    <section id="failures">
+      <h2>Failure modes</h2>
+      <p>
+        Nine failures that happen in production, reproduced here with the evidence read out of the
+        kernel:
+      </p>
+      <ul>
+        <li>a pod is <code>OOMKilled</code> with exit <code>137</code> — and <code>memory.events</code> says how close it had been, for how long</li>
+        <li>a container ignores <code>SIGTERM</code> for the full grace period — because PID 1 gets no default handlers</li>
+        <li>zombies pile up until <code>fork()</code> fails — because PID 1 was never written to be an init</li>
+        <li>CPU throttles at 10% utilisation — because <code>cpu.max</code> is a quota, not a share</li>
+        <li>a fix applied with <code>exec</code> survives a restart but not a recreate — because it lived in the OverlayFS upper layer, which <em>is</em> the container</li>
+        <li>a rootless bind mount is unwritable at mode <code>0777</code> — because the uid has no mapping and reads as <code>nobody</code></li>
+        <li><code>EPERM</code> mounting <code>/sys/fs/cgroup</code> — because the bundle asked for cgroup <strong>v1</strong> on a v2 host</li>
+      </ul>
+      <div class="note" data-tone="danger">
+        <p>
+          <strong>An OOM kill does not reliably produce exit 137.</strong> The kernel picks its victim by
+          badness score, usually the allocating process rather than PID 1. Kill a child and PID 1 carries
+          on: the container exits <code>0</code> having lost a process, with <code>oom_kill=1</code> in
+          <code>memory.events</code> and nothing else to show for it. Kubernetes only marks a pod
+          <code>OOMKilled</code> when PID 1 dies of signal 9, so this case restarts nothing and alerts
+          nobody.
+        </p>
+      </div>
+    </section>
+
+    <section id="production">
+      <h2>Before production</h2>
+      <div class="note" data-tone="danger">
+        <p>
+          <strong>Do not put this in production.</strong> That is not modesty about code quality — it is
+          the stated purpose. This exists to build a model of the runtime layer, and the things a
+          production runtime needs that this deliberately does not have are listed below.
+        </p>
+      </div>
+      <p>
+        <strong>Not finished: rootless without any privilege.</strong> The user namespace machinery works
+        and is tested, but <code>mars</code> still expects to be started with privilege. A fully rootless
+        run also needs a delegated cgroup under <code>user.slice</code>,
+        <code>fuse-overlayfs</code> or <code>userxattr</code> for whiteouts, and
+        <code>slirp4netns</code> for networking.
+      </p>
+      <p>
+        Verified environment: Ubuntu 24.04, kernel 6.8, aarch64, pure cgroup v2 with
+        <code>cpu cpuset io memory pids</code> delegated, unprivileged user namespaces enabled, and
+        <code>runc</code> 1.5.1 plus Docker 29.7.2 alongside for comparison.
+      </p>
+    </section>
+
+    <section id="excluded">
+      <h2>Out of scope</h2>
+      <p>Left out on purpose, each because something else already owns it:</p>
+      <div class="scroller">
+        <table>
+          <tr><th>Image pulling from registries</th><td>containerd's job; the runtime is called after the bundle exists</td></tr>
+          <tr><th>CNI networking</th><td>the network namespace is created; populating it belongs to a plugin</td></tr>
+          <tr><th>CRI</th><td>the kubelet interface sits a layer above an OCI runtime</td></tr>
+          <tr><th>cgroup v1, systemd cgroup driver</th><td>a pure v2 hierarchy is the target, and a second driver would double the surface for no insight</td></tr>
+          <tr><th>Checkpoint and restore</th><td>a project of its own</td></tr>
+          <tr><th>SELinux and AppArmor labels</th><td>parsed and ignored, rather than silently claimed</td></tr>
+          <tr><th><code>SCMP_ACT_NOTIFY</code></th><td>needs a listener process to receive the notification fd</td></tr>
+        </table>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer class="site">
+  Copyright 2026 Umar Sabirin. Apache License 2.0.
+  <a href="https://github.com/MarStack-Labs/marstack-container">MarStack-Labs/marstack-container</a>
+</footer>
+
+</body>
+</html>

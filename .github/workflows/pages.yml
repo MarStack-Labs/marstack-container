@@ -1,0 +1,92 @@
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Refuse a page that asks for a file it does not have
+        run: |
+          missing=0
+          for asset in $(grep -oE '(href|src)="[^"]+"' site/index.html \
+              | grep -vE 'https?:|#' \
+              | sed -E 's/.*="([^"]+)"/\1/' | sort -u); do
+            if [ ! -f "site/$asset" ]; then
+              echo "site/index.html references $asset, which is not in site/"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Refuse a link to a section that does not exist
+        run: |
+          grep -oE 'href="#[^"]+"' site/index.html | sed -E 's/href="#(.*)"/\1/' | sort -u > /tmp/anchors
+          grep -oE '<section id="[^"]+"' site/index.html | sed -E 's/.*id="(.*)"/\1/' | sort -u > /tmp/sections
+          if ! comm -23 /tmp/anchors /tmp/sections | grep -q .; then
+            exit 0
+          fi
+          echo "these links point at sections the page does not have:"
+          comm -23 /tmp/anchors /tmp/sections
+          exit 1
+
+      - name: Refuse a theme token the stylesheet does not define
+        run: |
+          grep -oE 'var\(--ms-[a-z0-9-]+\)' site/site.css \
+            | sed -E 's/var\((.*)\)/\1/' | sort -u > /tmp/used
+          grep -oE '\--ms-[a-z0-9-]+:' site/meridian.css | tr -d ':' | sort -u > /tmp/defined
+          if ! comm -23 /tmp/used /tmp/defined | grep -q .; then
+            exit 0
+          fi
+          echo "site.css uses tokens meridian.css does not define, so those rules are dropped:"
+          comm -23 /tmp/used /tmp/defined
+          exit 1
+
+      - name: Refuse a theme that has drifted from the other marstack sites
+        run: |
+          for asset in meridian.css site.css; do
+            remote=$(curl -sSL --fail \
+              "https://raw.githubusercontent.com/MarStack-Labs/marstack-access/main/site/$asset") || {
+                echo "cannot read $asset from marstack-access; skipping the drift check"
+                continue
+              }
+            if [ "$(printf '%s' "$remote" | sha256sum | cut -d' ' -f1)" \
+               != "$(sha256sum "site/$asset" | cut -d' ' -f1)" ]; then
+              echo "site/$asset differs from the copy marstack-access ships"
+              echo "this repository vendors the theme because it has no console to copy it from,"
+              echo "so drift has to be caught here rather than by a build step"
+              exit 1
+            fi
+          done
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
