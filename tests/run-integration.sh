@@ -288,6 +288,7 @@ check "container sees its own cgroup as the root" "0::/" "$cgns"
 echo
 echo "memory.max and OOM kill"
 bundle "$WORK/oom" '.linux.resources.memory.limit = 33554432
+  | .linux.resources.memory.swap = 33554432
   | .process.args = ["/usr/bin/awk","BEGIN{s=\"\";while(1){s = s sprintf(\"%1000000s\",\"\")}}"]'
 oom_log=$(run_in "$WORK/oom" it-oom 2>&1)
 check "OOM kill is reported as 128+9" "137" "$?"
