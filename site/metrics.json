@@ -1,0 +1,20 @@
+{
+  "measured_at": "2026-09-13",
+  "method": {
+    "host": "aarch64 guest under apple, 4 cores",
+    "os": "Linux 6.8.0-134-generic (aarch64)",
+    "version": "mars 0.1.0",
+    "runs": 5,
+    "statistic": "median, fresh container per run, image already pulled"
+  },
+  "values": {
+    "binary_bytes": 3480376,
+    "deps_direct": 12,
+    "deps_total": 80,
+    "start_mars_ms": 117.0,
+    "start_runc_ms": 134.0,
+    "cap_effective_hex": "00000000a80425fb",
+    "cap_effective_count": 14,
+    "validation_passed": 26
+  }
+}
