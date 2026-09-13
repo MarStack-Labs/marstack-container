@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -106,12 +106,20 @@ fn one(hook: &Hook, payload: &[u8]) -> Result<()> {
         .spawn()
         .ctx(format!("spawn hook {}", hook.path().display()))?;
 
-    child
+    let mut stdin = child
         .stdin
         .take()
-        .ok_or_else(|| Error::Invalid("hook stdin was not captured".to_string()))?
-        .write_all(payload)
-        .ctx("write the container state to the hook's stdin")?;
+        .ok_or_else(|| Error::Invalid("hook stdin was not captured".to_string()))?;
+    match stdin.write_all(payload) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::BrokenPipe => {}
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).ctx("write the container state to the hook's stdin");
+        }
+    }
+    drop(stdin);
 
     let deadline = hook
         .timeout()
@@ -173,6 +181,18 @@ mod tests {
             .unwrap();
 
         run(Some(&hooks), Phase::CreateRuntime, &state()).unwrap();
+    }
+
+    #[test]
+    fn a_hook_that_never_reads_its_stdin_is_not_an_error() {
+        let hook = HookBuilder::default()
+            .path(PathBuf::from("/bin/true"))
+            .build()
+            .unwrap();
+
+        let payload = vec![b'x'; 1 << 20];
+
+        one(&hook, &payload).unwrap();
     }
 
     #[test]
