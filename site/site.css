@@ -237,6 +237,61 @@ pre code {
   border-left-color: var(--ms-info);
 }
 
+.demo {
+  margin: var(--ms-sp-5) 0;
+}
+
+.demo img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-r-md);
+  background: var(--ms-term-bg);
+}
+
+.demo figcaption {
+  margin-top: var(--ms-sp-3);
+  color: var(--ms-fg-faint);
+  font-size: var(--ms-fs-sm);
+}
+
+.stats {
+  display: grid;
+  gap: var(--ms-sp-3);
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  margin: var(--ms-sp-5) 0;
+}
+
+.stats .ms-stat dd.foot {
+  margin-top: var(--ms-sp-2);
+  color: var(--ms-fg-faint);
+  font-family: var(--ms-font);
+  font-size: var(--ms-fs-xs);
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.stats .ms-stat dd.foot code {
+  font-size: 0.95em;
+}
+
+.method {
+  margin: var(--ms-sp-4) 0;
+  padding: var(--ms-sp-3) var(--ms-sp-4);
+  border-radius: var(--ms-r-md);
+  background: var(--ms-bg-sunken);
+  color: var(--ms-fg-faint);
+  font-family: var(--ms-font-mono);
+  font-size: var(--ms-fs-xs);
+  line-height: 1.7;
+}
+
+.method b {
+  color: var(--ms-fg-muted);
+  font-weight: 700;
+}
+
 footer.site {
   max-width: 62rem;
   margin: 0 auto;
