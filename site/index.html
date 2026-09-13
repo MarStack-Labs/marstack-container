@@ -53,6 +53,7 @@
 <div class="page">
   <aside class="toc">
     <ol>
+      <li><a href="#demo">Watch it run</a></li>
       <li><a href="#what">What it is</a></li>
       <li><a href="#install">Install</a></li>
       <li><a href="#quickstart">First container</a></li>
@@ -62,6 +63,7 @@
       <li><a href="#hardening">Hardening</a></li>
       <li><a href="#docker">As a Docker runtime</a></li>
       <li><a href="#tracing">Startup traces</a></li>
+      <li><a href="#numbers">Numbers</a></li>
       <li><a href="#surface">Attack surface</a></li>
       <li><a href="#failures">Failure modes</a></li>
       <li><a href="#production">Before production</a></li>
@@ -70,6 +72,32 @@
   </aside>
 
   <main class="body">
+
+    <section id="demo">
+      <h2>Watch it run</h2>
+
+      <p>
+        Docker, driving <code>mars</code> instead of its usual runtime. A memory limit set on the
+        command line is read back out of the cgroup that <code>mars</code> created and wrote. The
+        container's init is PID 1 in a PID namespace of its own, and it is left holding a bounded
+        capability set rather than the full one it started with.
+      </p>
+
+      <figure class="demo">
+        <img src="demo.gif" alt="A terminal session running containers through docker with the mars runtime, reading back the cgroup memory limit, the PID namespace and the capability set"
+             width="921" height="525" loading="lazy">
+        <figcaption>
+          Recorded by
+          <a href="https://github.com/MarStack-Labs/marstack-container/blob/main/site/demo.sh">site/demo.sh</a>
+          into <a href="demo.cast">demo.cast</a>, an asciinema recording that is plain text you can
+          read line by line. Every line reads kernel state back out rather than trusting what the
+          runtime says it did.
+        </figcaption>
+        <pre><code>asciinema rec --command ./site/demo.sh site/demo.cast
+agg site/demo.cast site/demo.gif</code></pre>
+      </figure>
+    </section>
+
 
     <section id="what">
       <h2>What it is</h2>
@@ -288,6 +316,62 @@ MARS_OTLP_ENDPOINT=127.0.0.1:4318 sudo -E mars run demo</code></pre>
       </p>
     </section>
 
+    <section id="numbers">
+      <h2>Numbers</h2>
+
+      <p>
+        These are measured by <code>scripts/bench.sh</code> and read from
+        <a href="metrics.json">metrics.json</a> when the page loads, so a figure that has not been
+        measured on the current build shows a dash rather than a number somebody remembered. The
+        attack profile below is the exception and is measured separately, by
+        <code>scripts/hap-bench.sh</code>, because it needs root and ftrace.
+      </p>
+
+      <div class="stats">
+        <dl class="ms-stat" style="--ms-stat-hue: var(--ms-accent)">
+          <dt>Binary</dt>
+          <dd data-metric="binary_bytes" data-unit="mib">&mdash;</dd>
+          <dd class="foot">the whole runtime, statically linked against nothing exotic</dd>
+        </dl>
+        <dl class="ms-stat" style="--ms-stat-hue: var(--ms-ok)">
+          <dt>Direct dependencies</dt>
+          <dd data-metric="deps_direct">&mdash;</dd>
+          <dd class="foot"><span data-metric="deps_total">&mdash;</span> crates in the lock file</dd>
+        </dl>
+        <dl class="ms-stat" style="--ms-stat-hue: var(--ms-info)">
+          <dt>Container start</dt>
+          <dd data-metric="start_mars_ms" data-unit="ms">&mdash;</dd>
+          <dd class="foot">through docker, to a container that has already exited</dd>
+        </dl>
+        <dl class="ms-stat" style="--ms-stat-hue: var(--ms-violet)">
+          <dt>Capabilities kept</dt>
+          <dd data-metric="cap_effective_count">&mdash;</dd>
+          <dd class="foot">read out of <code>/proc/self/status</code> inside the container</dd>
+        </dl>
+        <dl class="ms-stat" style="--ms-stat-hue: var(--ms-cyan)">
+          <dt>OCI assertions passing</dt>
+          <dd data-metric="validation_passed">&mdash;</dd>
+          <dd class="foot">from the runtime-spec validation suite</dd>
+        </dl>
+      </div>
+
+      <p class="method" data-method>
+        Measured on <b data-method-host>&mdash;</b>, <span data-method-os>&mdash;</span>, build
+        <span data-method-version>&mdash;</span>. <span data-method-statistic>&mdash;</span>,
+        <span data-method-runs>&mdash;</span> runs per figure. Last measured
+        <span data-method-date>&mdash;</span>.
+      </p>
+
+      <div class="note" data-tone="warn">
+        <p>
+          <strong>Start latency is the least interesting number on this page.</strong> It is
+          dominated by docker and by image setup, it moves with whatever else the machine is doing,
+          and it says nothing about the thing that actually matters for a runtime. That is the
+          attack profile below, which is why this project measures that instead.
+        </p>
+      </div>
+    </section>
+
     <section id="surface">
       <h2>Attack surface</h2>
       <p>
@@ -412,6 +496,8 @@ MARS_OTLP_ENDPOINT=127.0.0.1:4318 sudo -E mars run demo</code></pre>
   Copyright 2026 Umar Sabirin. Apache License 2.0.
   <a href="https://github.com/MarStack-Labs/marstack-container">MarStack-Labs/marstack-container</a>
 </footer>
+
+<script src="metrics.js"></script>
 
 </body>
 </html>
